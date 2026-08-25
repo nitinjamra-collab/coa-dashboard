@@ -95,7 +95,7 @@ step = 50 if index_choice == "^NSEI" else 100
 atm_strike = round(spot / step) * step
 strikes = [atm_strike + (i * step) for i in range(-5, 6)]
 
-# Primary Support & Resistance Strikes
+# Support & Resistance Key Strike Levels
 k_r_vol = atm_strike + step
 k_s_vol = atm_strike
 k_r_oi  = atm_strike + (step * 2)
@@ -107,7 +107,7 @@ pe_vol_ltp = max(5.0, round((spot - k_s_vol) * 0.45 + 28.0, 2))
 eor = k_r_vol + ce_vol_ltp
 eos = k_s_vol - pe_vol_ltp
 
-# Shift Candidates (2nd Highest)
+# 2nd Highest Candidates for Shift Tracking (WTT / WTB)
 second_ce_vol_strike = atm_strike + (step * 2)
 second_pe_vol_strike = atm_strike - step
 
@@ -129,7 +129,7 @@ if pe_shift_ratio >= 75:
 else:
     pe_state = "STRONG"
 
-# Build Option Ladder
+# Build Base Ladder Table
 ladder = []
 for s in strikes:
     c_v = max_ce_vol_val if s == k_r_vol else (second_ce_vol_val if s == second_ce_vol_strike else int(max_ce_vol_val * 0.42))
@@ -138,17 +138,34 @@ for s in strikes:
     p_o = 225000 if s == k_s_oi else 79000
 
     ladder.append({
-        'Strike': s,
-        'CE_OI': c_o,
-        'CE_Vol': c_v,
-        'CE_LTP': max(1.5, round((k_r_vol + 50 - s) * 0.42 + 15.0, 2)),
-        'PE_LTP': max(1.5, round((s - (k_s_vol - 50)) * 0.42 + 15.0, 2)),
-        'PE_Vol': p_v,
-        'PE_OI': p_o
+        'Strike': str(s),
+        'CE_OI': f"{c_o:,}",
+        'CE_Vol': f"{c_v:,}",
+        'CE_LTP': f"{max(1.5, round((k_r_vol + 50 - s) * 0.42 + 15.0, 2)):.2f}",
+        'PE_LTP': f"{max(1.5, round((s - (k_s_vol - 50)) * 0.42 + 15.0, 2)):.2f}",
+        'PE_Vol': f"{p_v:,}",
+        'PE_OI': f"{p_o:,}",
+        '_raw_strike': s,
+        '_is_spot_line': False
     })
 
-# Sorted in Descending Order (Highest Strike at Top)
-df = pd.DataFrame(ladder).sort_values('Strike', ascending=False).reset_index(drop=True)
+df_ladder = pd.DataFrame(ladder).sort_values('_raw_strike', ascending=False)
+
+# Insert the Dynamic LTP Calculator Spot Line Divider
+spot_row = pd.DataFrame([{
+    'Strike': f"📍 SPOT LTP: {spot:.2f}",
+    'CE_OI': "───",
+    'CE_Vol': "───",
+    'CE_LTP': "───",
+    'PE_LTP': "───",
+    'PE_Vol': "───",
+    'PE_OI': "───",
+    '_raw_strike': spot,
+    '_is_spot_line': True
+}])
+
+# Combine and Sort (Descending Order)
+df = pd.concat([df_ladder, spot_row]).sort_values('_raw_strike', ascending=False).reset_index(drop=True)
 
 # --- 6. Metric Cards ---
 c1, c2, c3 = st.columns(3)
@@ -175,49 +192,50 @@ elif "WTT" in ce_state:
 else:
     st.info(f"⚖️ **Range Equilibrium**: Spot is {abs(spot - eos):.1f} pts from EOS and {abs(eor - spot):.1f} pts from EOR.")
 
-# --- 9. Color-Coded Table Styler ---
+# --- 9. Color-Coded Table with Spot Line Highlight ---
 st.subheader("📊 Live Option Ladder (Descending Strikes)")
+
+display_df = df.drop(columns=['_raw_strike'])
 
 def style_ladder(row):
     styles = [''] * len(row)
-    strike_val = row['Strike']
     
-    # 1. ATM Strike -> Royal Blue
+    # 1. Full-width Spot Line Divider -> Amber / Gold Highlight
+    if row['_is_spot_line']:
+        return ['background-color: #ffd600; color: #000000; font-weight: 900; font-size: 14px; text-align: center;'] * len(row)
+    
+    strike_val = int(row['Strike'])
+    
+    # 2. ATM Strike -> Royal Blue
     if strike_val == atm_strike:
-        styles[df.columns.get_loc('Strike')] = 'background-color: #0d47a1; color: #ffffff; font-weight: bold;'
+        styles[display_df.columns.get_loc('Strike')] = 'background-color: #0d47a1; color: #ffffff; font-weight: bold;'
 
-    # 2. Call Side Highlights
+    # 3. Call Side Highlights
     if strike_val == k_r_vol:
-        styles[df.columns.get_loc('CE_Vol')] = 'background-color: #b71c1c; color: #ffffff; font-weight: bold;'
+        styles[display_df.columns.get_loc('CE_Vol')] = 'background-color: #b71c1c; color: #ffffff; font-weight: bold;'
     elif ce_shift_ratio >= 75 and strike_val == second_ce_vol_strike:
-        styles[df.columns.get_loc('CE_Vol')] = 'background-color: #ff6f00; color: #ffffff; font-weight: bold;'
+        styles[display_df.columns.get_loc('CE_Vol')] = 'background-color: #ff6f00; color: #ffffff; font-weight: bold;'
 
     if strike_val == k_r_oi:
-        styles[df.columns.get_loc('CE_OI')] = 'background-color: #880e4f; color: #ffffff; font-weight: bold;'
+        styles[display_df.columns.get_loc('CE_OI')] = 'background-color: #880e4f; color: #ffffff; font-weight: bold;'
 
-    # 3. Put Side Highlights
+    # 4. Put Side Highlights
     if strike_val == k_s_vol:
-        styles[df.columns.get_loc('PE_Vol')] = 'background-color: #1b5e20; color: #ffffff; font-weight: bold;'
+        styles[display_df.columns.get_loc('PE_Vol')] = 'background-color: #1b5e20; color: #ffffff; font-weight: bold;'
     elif pe_shift_ratio >= 75 and strike_val == second_pe_vol_strike:
-        styles[df.columns.get_loc('PE_Vol')] = 'background-color: #f57f17; color: #ffffff; font-weight: bold;'
+        styles[display_df.columns.get_loc('PE_Vol')] = 'background-color: #f57f17; color: #ffffff; font-weight: bold;'
 
     if strike_val == k_s_oi:
-        styles[df.columns.get_loc('PE_OI')] = 'background-color: #004d40; color: #ffffff; font-weight: bold;'
+        styles[display_df.columns.get_loc('PE_OI')] = 'background-color: #004d40; color: #ffffff; font-weight: bold;'
 
     return styles
 
-styled_df = df.style.apply(style_ladder, axis=1).format({
-    'CE_OI': '{:,}',
-    'CE_Vol': '{:,}',
-    'CE_LTP': '{:.2f}',
-    'PE_LTP': '{:.2f}',
-    'PE_Vol': '{:,}',
-    'PE_OI': '{:,}'
-})
+styled_df = display_df.style.apply(style_ladder, axis=1)
 
-st.dataframe(styled_df, use_container_width=True)
+# Render table without the boolean helper column
+st.dataframe(styled_df, use_container_width=True, hide_index=True, column_config={"_is_spot_line": None})
 
-# --- 10. Auto-Refresh Engine ---
+# --- 10. Auto-Refresh Cycle ---
 if auto_refresh:
     time.sleep(5)
     st.rerun()
