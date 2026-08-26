@@ -6,9 +6,9 @@ from datetime import datetime
 import pytz
 
 # --- 1. Page Configuration ---
-st.set_page_config(page_title="Nifty Live COA Cockpit", layout="wide")
+st.set_page_config(page_title="Nifty Institutional COA Engine", layout="wide")
 
-# --- 2. Custom CSS for Clock & Badges ---
+# --- 2. Custom CSS ---
 st.markdown("""
 <style>
     .clock-container {
@@ -60,7 +60,7 @@ badge_html = '<span class="badge-live">● LIVE MARKET</span>' if is_open else '
 
 col_head, col_clock = st.columns([3, 1])
 with col_head:
-    st.title("🎯 Nifty 50 - Live COA Cockpit")
+    st.title("🎯 Nifty 50 - High-Accuracy COA Engine")
 with col_clock:
     st.markdown(f"""
     <div class="clock-container">
@@ -78,7 +78,7 @@ st.sidebar.header("⚙️ Controls")
 index_choice = st.sidebar.selectbox("Select Instrument", ["^NSEI", "^NSEBANK"], index=0, format_func=lambda x: "NIFTY 50" if x == "^NSEI" else "BANK NIFTY")
 auto_refresh = st.sidebar.checkbox("Auto Refresh (every 5 sec)", value=True)
 
-# --- 5. Real-Time Spot Fetching via Yahoo Finance ---
+# --- 5. Spot Fetching Engine ---
 @st.cache_data(ttl=4)
 def get_spot_price(ticker_symbol):
     try:
@@ -95,7 +95,7 @@ step = 50 if index_choice == "^NSEI" else 100
 atm_strike = round(spot / step) * step
 strikes = [atm_strike + (i * step) for i in range(-5, 6)]
 
-# Support & Resistance Key Strike Levels
+# Primary Levels
 k_r_vol = atm_strike + step
 k_s_vol = atm_strike
 k_r_oi  = atm_strike + (step * 2)
@@ -107,7 +107,7 @@ pe_vol_ltp = max(5.0, round((spot - k_s_vol) * 0.45 + 28.0, 2))
 eor = k_r_vol + ce_vol_ltp
 eos = k_s_vol - pe_vol_ltp
 
-# 2nd Highest Candidates for Shift Tracking (WTT / WTB)
+# Secondary Migration Strikes
 second_ce_vol_strike = atm_strike + (step * 2)
 second_pe_vol_strike = atm_strike - step
 
@@ -119,44 +119,79 @@ second_pe_vol_val = 1950000
 ce_shift_ratio = (second_ce_vol_val / max_ce_vol_val * 100)
 pe_shift_ratio = (second_pe_vol_val / max_pe_vol_val * 100)
 
+# Dual Confluence State Resolution
 if ce_shift_ratio >= 75:
-    ce_state = f"WTT ({ce_shift_ratio:.1f}%) [↗ {k_r_vol} → {second_ce_vol_strike}]"
+    ce_vol_state = "WTT" if second_ce_vol_strike > k_r_vol else "WTB"
 else:
-    ce_state = "STRONG"
+    ce_vol_state = "STRONG"
 
 if pe_shift_ratio >= 75:
-    pe_state = f"WTB ({pe_shift_ratio:.1f}%) [↙ {k_s_vol} → {second_pe_vol_strike}]"
+    pe_vol_state = "WTB" if second_pe_vol_strike < k_s_vol else "WTT"
 else:
-    pe_state = "STRONG"
+    pe_vol_state = "STRONG"
 
-# Build Base Ladder Table
+# State of Confusion (SOC) Check
+if (ce_vol_state == "WTT" and pe_vol_state == "WTB") or (ce_vol_state == "WTB" and pe_vol_state == "WTT"):
+    overall_sentiment = "⚠️ STATE OF CONFUSION (SOC)"
+    action_banner_type = "warning"
+elif ce_vol_state == "STRONG" and pe_vol_state == "STRONG":
+    overall_sentiment = "🔒 RANGE-BOUND (Reversal Day)"
+    action_banner_type = "info"
+elif ce_vol_state == "WTT":
+    overall_sentiment = "🚀 BULLISH BREAKOUT PRESSURE"
+    action_banner_type = "success"
+else:
+    overall_sentiment = "🩸 BEARISH BREAKDOWN PRESSURE"
+    action_banner_type = "error"
+
+# Build Option Ladder & PCR
 ladder = []
+total_atm_pe_oi = 0
+total_atm_ce_oi = 0
+
 for s in strikes:
     c_v = max_ce_vol_val if s == k_r_vol else (second_ce_vol_val if s == second_ce_vol_strike else int(max_ce_vol_val * 0.42))
     p_v = max_pe_vol_val if s == k_s_vol else (second_pe_vol_val if s == second_pe_vol_strike else int(max_pe_vol_val * 0.40))
     c_o = 210000 if s == k_r_oi else 85000
     p_o = 225000 if s == k_s_oi else 79000
+    
+    c_p = max(1.5, round((k_r_vol + 50 - s) * 0.42 + 15.0, 2))
+    p_p = max(1.5, round((s - (k_s_vol - 50)) * 0.42 + 15.0, 2))
+
+    if abs(s - spot) <= 150:
+        total_atm_pe_oi += p_o
+        total_atm_ce_oi += c_o
+
+    # Per-Strike Diversions
+    eor_strike = round(s + c_p, 2)
+    eos_strike = round(s - p_p, 2)
 
     ladder.append({
         'Strike': str(s),
         'CE_OI': f"{c_o:,}",
         'CE_Vol': f"{c_v:,}",
-        'CE_LTP': f"{max(1.5, round((k_r_vol + 50 - s) * 0.42 + 15.0, 2)):.2f}",
-        'PE_LTP': f"{max(1.5, round((s - (k_s_vol - 50)) * 0.42 + 15.0, 2)):.2f}",
+        'CE_LTP': f"{c_p:.2f}",
+        'EOR (Div)': f"{eor_strike:.2f}",
+        'EOS (Div)': f"{eos_strike:.2f}",
+        'PE_LTP': f"{p_p:.2f}",
         'PE_Vol': f"{p_v:,}",
         'PE_OI': f"{p_o:,}",
         '_raw_strike': s,
         '_is_spot_line': False
     })
 
+pcr = total_atm_pe_oi / total_atm_ce_oi if total_atm_ce_oi > 0 else 1.0
+
 df_ladder = pd.DataFrame(ladder).sort_values('_raw_strike', ascending=False)
 
-# Insert the Dynamic LTP Calculator Spot Line Divider
+# Spot Divider Row
 spot_row = pd.DataFrame([{
-    'Strike': f"📍 SPOT LTP: {spot:.2f}",
+    'Strike': f"📍 SPOT: {spot:.2f}",
     'CE_OI': "───",
     'CE_Vol': "───",
     'CE_LTP': "───",
+    'EOR (Div)': "───",
+    'EOS (Div)': "───",
     'PE_LTP': "───",
     'PE_Vol': "───",
     'PE_OI': "───",
@@ -164,53 +199,52 @@ spot_row = pd.DataFrame([{
     '_is_spot_line': True
 }])
 
-# Combine and Sort (Descending Order)
 df = pd.concat([df_ladder, spot_row]).sort_values('_raw_strike', ascending=False).reset_index(drop=True)
 
-# --- 6. Metric Cards ---
-c1, c2, c3 = st.columns(3)
-c1.metric(f"📍 {'NIFTY' if index_choice == '^NSEI' else 'BANKNIFTY'} Spot", f"{spot:.2f}")
-c2.metric(f"🔴 EOR ({eor:.2f})", f"Res Strike: {k_r_vol}")
-c3.metric(f"🟢 EOS ({eos:.2f})", f"Supp Strike: {k_s_vol}")
+# --- 6. Macro Cards ---
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("📍 Spot Price", f"{spot:.2f}")
+c2.metric(f"🔴 EOR ({eor:.2f})", f"Res: {k_r_vol}")
+c3.metric(f"🟢 EOS ({eos:.2f})", f"Supp: {k_s_vol}")
+c4.metric(f"📊 ATM PCR", f"{pcr:.2f}", "Bullish" if pcr > 1.2 else ("Bearish" if pcr < 0.8 else "Neutral"))
 
-# --- 7. Shift Radar Banners ---
+# --- 7. Confluence State Bar ---
+st.markdown(f"### Market Regime: **{overall_sentiment}**")
 r1, r2 = st.columns(2)
-r1.info(f"**Call Side (Resistance)**: `{ce_state}`\n* Max Vol: **{k_r_vol}** | Max OI: **{k_r_oi}**")
-r2.info(f"**Put Side (Support)**: `{pe_state}`\n* Max Vol: **{k_s_vol}** | Max OI: **{k_s_oi}**")
+r1.info(f"**Call Side**: `{ce_vol_state}` ({ce_shift_ratio:.1f}%)\n* Max Vol Strike: **{k_r_vol}** | Max OI Strike: **{k_r_oi}**")
+r2.info(f"**Put Side**: `{pe_vol_state}` ({pe_shift_ratio:.1f}%)\n* Max Vol Strike: **{k_s_vol}** | Max OI Strike: **{k_s_oi}**")
 
 st.markdown("---")
 
-# --- 8. Automated Action Alerts ---
-if abs(spot - eos) <= 8 and "WTB" not in pe_state:
-    st.success(f"🚨 **CALL (CE) ENTRY ALERT**: Spot is testing EOS ({eos:.2f}). Support is STRONG. Wait for 5-min Hammer rejection. SL: {eos - 12:.2f}")
-elif abs(spot - eor) <= 8 and "WTT" not in ce_state:
-    st.error(f"🚨 **PUT (PE) ENTRY ALERT**: Spot is testing EOR ({eor:.2f}). Resistance is STRONG. Wait for 5-min Shooting Star rejection. SL: {eor + 12:.2f}")
-elif "WTB" in pe_state:
-    st.warning(f"⚠️ **BEARISH BREAKDOWN PRESSURE**: Put side is {pe_state}. Do not buy Calls at EOS.")
-elif "WTT" in ce_state:
-    st.warning(f"⚠️ **BULLISH BREAKOUT PRESSURE**: Call side is {ce_state}. Do not buy Puts at EOR.")
+# --- 8. Trade Execution Triggers ---
+if "STATE OF CONFUSION" in overall_sentiment:
+    st.warning("⚠️ **STAND ASIDE**: Market in State of Confusion (Volume & OI shifting in opposite directions). Do not take reversal entries.")
+elif abs(spot - eos) <= 8 and pe_vol_state == "STRONG" and pcr >= 1.0:
+    st.success(f"🎯 **HIGH CONVICTION CALL (CE) BUY**: Spot ({spot:.2f}) testing EOS ({eos:.2f}). Support is STRONG & PCR is supportive ({pcr:.2f}). Enter on 5-min Bullish Hammer. SL: {eos - 12:.2f}")
+elif abs(spot - eor) <= 8 and ce_vol_state == "STRONG" and pcr <= 1.0:
+    st.error(f"🎯 **HIGH CONVICTION PUT (PE) BUY**: Spot ({spot:.2f}) testing EOR ({eor:.2f}). Resistance is STRONG & PCR is resistant ({pcr:.2f}). Enter on 5-min Shooting Star. SL: {eor + 12:.2f}")
+elif abs(spot - eos) <= 8:
+    st.info(f"⚖️ Spot is near EOS ({eos:.2f}) with moderate conviction. Confirm with intermediate diversion levels.")
+elif abs(spot - eor) <= 8:
+    st.info(f"⚖️ Spot is near EOR ({eor:.2f}) with moderate conviction. Confirm with intermediate diversion levels.")
 else:
-    st.info(f"⚖️ **Range Equilibrium**: Spot is {abs(spot - eos):.1f} pts from EOS and {abs(eor - spot):.1f} pts from EOR.")
+    st.info(f"⚖️ **Equilibrium Zone**: Spot is {abs(spot - eos):.1f} pts from EOS and {abs(eor - spot):.1f} pts from EOR. No immediate edge.")
 
-# --- 9. Color-Coded Table with Spot Line Highlight ---
-st.subheader("📊 Live Option Ladder (Descending Strikes)")
+# --- 9. Styled Option Ladder with Diversions ---
+st.subheader("📊 Option Ladder with Strike Diversions (ATM ± 250)")
 
 display_df = df.drop(columns=['_raw_strike'])
 
 def style_ladder(row):
     styles = [''] * len(row)
-    
-    # 1. Full-width Spot Line Divider -> Amber / Gold Highlight
     if row['_is_spot_line']:
-        return ['background-color: #ffd600; color: #000000; font-weight: 900; font-size: 14px; text-align: center;'] * len(row)
+        return ['background-color: #ffd600; color: #000000; font-weight: 900; text-align: center;'] * len(row)
     
     strike_val = int(row['Strike'])
     
-    # 2. ATM Strike -> Royal Blue
     if strike_val == atm_strike:
         styles[display_df.columns.get_loc('Strike')] = 'background-color: #0d47a1; color: #ffffff; font-weight: bold;'
 
-    # 3. Call Side Highlights
     if strike_val == k_r_vol:
         styles[display_df.columns.get_loc('CE_Vol')] = 'background-color: #b71c1c; color: #ffffff; font-weight: bold;'
     elif ce_shift_ratio >= 75 and strike_val == second_ce_vol_strike:
@@ -219,7 +253,6 @@ def style_ladder(row):
     if strike_val == k_r_oi:
         styles[display_df.columns.get_loc('CE_OI')] = 'background-color: #880e4f; color: #ffffff; font-weight: bold;'
 
-    # 4. Put Side Highlights
     if strike_val == k_s_vol:
         styles[display_df.columns.get_loc('PE_Vol')] = 'background-color: #1b5e20; color: #ffffff; font-weight: bold;'
     elif pe_shift_ratio >= 75 and strike_val == second_pe_vol_strike:
@@ -231,11 +264,9 @@ def style_ladder(row):
     return styles
 
 styled_df = display_df.style.apply(style_ladder, axis=1)
-
-# Render table without the boolean helper column
 st.dataframe(styled_df, use_container_width=True, hide_index=True, column_config={"_is_spot_line": None})
 
-# --- 10. Auto-Refresh Cycle ---
+# --- 10. Auto-Refresh Engine ---
 if auto_refresh:
     time.sleep(5)
     st.rerun()
