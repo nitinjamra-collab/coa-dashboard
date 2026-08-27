@@ -273,7 +273,7 @@ else:
     st.info(f"⚖️ **Equilibrium Zone**: Spot is {abs(spot - macro_eos):.1f} pts from Macro EOS and {abs(macro_eor - spot):.1f} pts from Macro EOR. Stand aside.")
 
 # --- 9. Styled Option Ladder with Per-Strike Diversions ---
-st.subheader("📊 Live Option Ladder with Per-Strike Diversions (Descending Strikes)")
+st.subheader("📊 Live Option Chain)")
 
 display_df = df_final.drop(columns=['_raw_strike'])
 
