@@ -6,9 +6,9 @@ from datetime import datetime
 import pytz
 
 # --- 1. Page Configuration ---
-st.set_page_config(page_title="Nifty Institutional COA Cockpit", layout="wide")
+st.set_page_config(page_title="Nifty Institutional COA Engine", layout="wide")
 
-# --- 2. Custom CSS ---
+# --- 2. Custom Styling ---
 st.markdown("""
 <style>
     .clock-container {
@@ -60,7 +60,7 @@ badge_html = '<span class="badge-live">● LIVE MARKET</span>' if is_open else '
 
 col_head, col_clock = st.columns([3, 1])
 with col_head:
-    st.title("🎯 Nifty 50 - COA")
+    st.title("🎯 Nifty 50 - Institutional COA Engine")
 with col_clock:
     st.markdown(f"""
     <div class="clock-container">
@@ -78,7 +78,7 @@ st.sidebar.header("⚙️ Controls")
 index_choice = st.sidebar.selectbox("Select Instrument", ["^NSEI", "^NSEBANK"], index=0, format_func=lambda x: "NIFTY 50" if x == "^NSEI" else "BANK NIFTY")
 auto_refresh = st.sidebar.checkbox("Auto Refresh (every 5 sec)", value=True)
 
-# --- 5. Data Fetching (Spot, VIX, Intraday VWAP) ---
+# --- 5. Data Fetching (Spot, Real Intraday VWAP, India VIX) ---
 def fetch_institutional_market_data(ticker_symbol):
     try:
         tkr = yf.Ticker(ticker_symbol)
@@ -86,33 +86,32 @@ def fetch_institutional_market_data(ticker_symbol):
         
         if not hist.empty:
             spot_val = float(hist['Close'].iloc[-1])
-            high_val = float(hist['High'].max())
-            low_val = float(hist['Low'].min())
-            close_val = float(hist['Close'].iloc[-1])
             
-            # Intraday VWAP Calculation
-            cum_vol = hist['Volume'].cumsum()
-            cum_vp = (hist['Close'] * hist['Volume']).cumsum()
-            vwap_val = float(cum_vp.iloc[-1] / cum_vol.iloc[-1]) if cum_vol.iloc[-1] > 0 else spot_val
-            
-            # Daily Floor Pivot
-            pivot_val = (high_val + low_val + close_val) / 3.0
+            # Robust VWAP Calculation: Sum(Price * Volume) / Sum(Volume)
+            valid_bars = hist[hist['Volume'] > 0]
+            if not valid_bars.empty:
+                cum_vol = valid_bars['Volume'].sum()
+                cum_vp = (valid_bars['Close'] * valid_bars['Volume']).sum()
+                vwap_val = float(cum_vp / cum_vol) if cum_vol > 0 else spot_val
+            else:
+                # Time-weighted baseline fallback if zero volume returned
+                vwap_val = float(hist['Close'].mean())
         else:
-            spot_val, vwap_val, pivot_val = 24850.0, 24840.0, 24830.0
+            spot_val, vwap_val = 24142.55, 24135.20
             
         # India VIX Fetch
         try:
             vix_tkr = yf.Ticker("^INDIAVIX")
             vix_hist = vix_tkr.history(period="1d", interval="1m")
-            vix_val = float(vix_hist['Close'].iloc[-1]) if not vix_hist.empty else 13.5
+            vix_val = float(vix_hist['Close'].iloc[-1]) if not vix_hist.empty else 10.97
         except Exception:
-            vix_val = 13.5
+            vix_val = 10.97
 
-        return spot_val, vwap_val, pivot_val, vix_val, None
+        return spot_val, vwap_val, vix_val, None
     except Exception as e:
-        return 24850.0, 24840.0, 24830.0, 13.5, str(e)
+        return 24142.55, 24135.20, 10.97, str(e)
 
-spot, vwap, pivot, vix, err = fetch_institutional_market_data(index_choice)
+spot, vwap, vix, err = fetch_institutional_market_data(index_choice)
 
 # Dynamic buffer calculation based on India VIX
 buffer_pts = 15.0 if vix > 16.0 else (12.0 if vix > 13.5 else 8.0)
@@ -179,9 +178,7 @@ for s in strikes:
         total_atm_pe_oi += p_o
         total_atm_ce_oi += c_o
 
-    # Calculate exact Diversions per Strike:
-    # EOR of Strike = Strike + CE LTP
-    # EOS of Strike = Strike - PE LTP
+    # Exact per-strike Diversions
     eor_div = s + c_p
     eos_div = s - p_p
 
@@ -197,7 +194,7 @@ for s in strikes:
         'PE_OI': p_o
     })
 
-# Strict Macro Extension anchored strictly to Max Volume Strikes
+# Strict Macro Extension anchored to Max Volume Strikes
 macro_eor = k_r_vol + anchor_ce_ltp
 macro_eos = k_s_vol - anchor_pe_ltp
 
@@ -240,13 +237,18 @@ spot_row = pd.DataFrame([{
 
 df_final = pd.concat([df_ladder, spot_row]).sort_values('_raw_strike', ascending=False).reset_index(drop=True)
 
-# --- 6. Macro Cards ---
-c1, c2, c3, c4, c5 = st.columns(5)
-c1.metric("📍 Live Spot", f"{spot:.2f}", f"VWAP: {vwap:.2f}")
-c2.metric(f"🔴 Macro EOR ({macro_eor:.2f})", f"Res Strike: {int(k_r_vol)}")
-c3.metric(f"🟢 Macro EOS ({macro_eos:.2f})", f"Supp Strike: {int(k_s_vol)}")
-c4.metric("📊 ATM PCR", f"{atm_pcr:.2f}", "Bullish" if atm_pcr > 1.2 else ("Bearish" if atm_pcr < 0.8 else "Neutral"))
-c5.metric("⚡ India VIX", f"{vix:.2f}", f"Buffer: ±{buffer_pts:.0f} pts")
+# --- 6. Dedicated Metric Cards ---
+c1, c2, c3, c4, c5, c6 = st.columns(6)
+
+vwap_diff = spot - vwap
+vwap_delta_str = f"{vwap_diff:+.2f} pts" if abs(vwap_diff) > 0.05 else "At VWAP"
+
+c1.metric(label="📍 Live Spot (LTP)", value=f"{spot:.2f}")
+c2.metric(label="⚖️ Day VWAP", value=f"{vwap:.2f}", delta=vwap_delta_str, delta_color="normal" if spot >= vwap else "inverse")
+c3.metric(label=f"🔴 Macro EOR ({macro_eor:.2f})", value=f"Res: {int(k_r_vol)}")
+c4.metric(label=f"🟢 Macro EOS ({macro_eos:.2f})", value=f"Supp: {int(k_s_vol)}")
+c5.metric(label="📊 ATM PCR", value=f"{atm_pcr:.2f}", delta="Bullish" if atm_pcr > 1.1 else ("Bearish" if atm_pcr < 0.9 else "Neutral"))
+c6.metric(label="⚡ India VIX", value=f"{vix:.2f}", delta=f"Buffer: ±{buffer_pts:.0f} pts")
 
 # --- 7. Shift Radar ---
 st.markdown(f"### Market Regime: **{overall_sentiment}**")
@@ -257,9 +259,6 @@ r2.info(f"**Put Side (Support)**: `{pe_vol_state}` ({pe_shift_ratio:.1f}%)\n* Ma
 st.markdown("---")
 
 # --- 8. Precision Action Signal Alerts ---
-vwap_bullish_confluence = (spot >= vwap)
-vwap_bearish_confluence = (spot <= vwap)
-
 if "STATE OF CONFUSION" in overall_sentiment:
     st.warning("⚠️ **STAND ASIDE**: Market in State of Confusion (Volume & OI shifting in opposite directions). Do not execute reversal trades.")
 elif abs(spot - macro_eos) <= buffer_pts and pe_vol_state == "STRONG" and atm_pcr >= 1.0:
@@ -274,7 +273,7 @@ else:
     st.info(f"⚖️ **Equilibrium Zone**: Spot is {abs(spot - macro_eos):.1f} pts from Macro EOS and {abs(macro_eor - spot):.1f} pts from Macro EOR. Stand aside.")
 
 # --- 9. Styled Option Ladder with Per-Strike Diversions ---
-st.subheader("📊 Live Option Ladder ")
+st.subheader("📊 Live Option Ladder with Per-Strike Diversions (Descending Strikes)")
 
 display_df = df_final.drop(columns=['_raw_strike'])
 
@@ -285,7 +284,7 @@ def style_ladder(row):
     
     strike_val = int(row['Strike'])
     
-    # ATM Highlight
+    # ATM Strike -> Royal Blue
     if strike_val == atm_strike:
         styles[display_df.columns.get_loc('Strike')] = 'background-color: #0d47a1; color: #ffffff; font-weight: bold;'
 
@@ -312,7 +311,7 @@ def style_ladder(row):
 styled_df = display_df.style.apply(style_ladder, axis=1)
 st.dataframe(styled_df, use_container_width=True, hide_index=True, column_config={"_is_spot_line": None})
 
-# Auto-refresh loop
+# Auto-refresh cycle
 if auto_refresh:
     time.sleep(5)
     st.rerun()
