@@ -60,7 +60,7 @@ badge_html = '<span class="badge-live">● LIVE MARKET</span>' if is_open else '
 
 col_head, col_clock = st.columns([3, 1])
 with col_head:
-    st.title("🎯 Nifty 50 - Institutional COA & Volatility Engine")
+    st.title("🎯 Nifty 50 - COA")
 with col_clock:
     st.markdown(f"""
     <div class="clock-container">
@@ -274,7 +274,7 @@ else:
     st.info(f"⚖️ **Equilibrium Zone**: Spot is {abs(spot - macro_eos):.1f} pts from Macro EOS and {abs(macro_eor - spot):.1f} pts from Macro EOR. Stand aside.")
 
 # --- 9. Styled Option Ladder with Per-Strike Diversions ---
-st.subheader("📊 Live Option Ladder with Per-Strike Diversions (Descending Order)")
+st.subheader("📊 Live Option Ladder ")
 
 display_df = df_final.drop(columns=['_raw_strike'])
 
