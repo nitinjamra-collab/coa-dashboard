@@ -80,45 +80,76 @@ index_choice = st.sidebar.selectbox("Select Instrument", ["NIFTY", "BANKNIFTY"],
 auto_refresh = st.sidebar.checkbox("Auto Refresh (every 5 sec)", value=True)
 
 # --- 5. Clean Live Option Chain Engine via nsepython ---
+import requests
+from nsepython import nse_optionchain_scrapper
+
 def fetch_live_chain(symbol):
+    # Attempt 1: Official nsepython scrapper
     try:
         raw_data = nse_optionchain_scrapper(symbol)
-        spot_val = float(raw_data['records']['underlyingValue'])
-        expiry = raw_data['records']['expiryDates'][0]
+        if raw_data and 'records' in raw_data and raw_data['records'].get('data'):
+            spot_val = float(raw_data['records']['underlyingValue'])
+            expiry = raw_data['records']['expiryDates'][0]
+            rows = []
+            for item in raw_data['records']['data']:
+                if item.get('expiryDate') == expiry:
+                    strike = float(item.get('strikePrice'))
+                    ce = item.get('CE', {})
+                    pe = item.get('PE', {})
+                    rows.append({
+                        'Strike': strike,
+                        'CE_OI': int(ce.get('openInterest', 0)),
+                        'CE_Vol': int(ce.get('totalTradedVolume', 0)),
+                        'CE_LTP': float(ce.get('lastPrice', 0.0)),
+                        'PE_LTP': float(pe.get('lastPrice', 0.0)),
+                        'PE_Vol': int(pe.get('totalTradedVolume', 0)),
+                        'PE_OI': int(pe.get('openInterest', 0))
+                    })
+            if rows:
+                return spot_val, pd.DataFrame(rows).sort_values('Strike').reset_index(drop=True), expiry, None
+    except Exception:
+        pass
+
+    # Attempt 2: Direct Session Handshake with Browser Headers
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Referer': 'https://www.nseindia.com/option-chain'
+        }
+        session = requests.Session()
+        session.get("https://www.nseindia.com", headers=headers, timeout=5)
         
-        rows = []
-        for item in raw_data['records']['data']:
-            if item.get('expiryDate') == expiry:
-                strike = float(item.get('strikePrice'))
-                ce = item.get('CE', {})
-                pe = item.get('PE', {})
-                rows.append({
-                    'Strike': strike,
-                    'CE_OI': int(ce.get('openInterest', 0)),
-                    'CE_Vol': int(ce.get('totalTradedVolume', 0)),
-                    'CE_LTP': float(ce.get('lastPrice', 0.0)),
-                    'PE_LTP': float(pe.get('lastPrice', 0.0)),
-                    'PE_Vol': int(pe.get('totalTradedVolume', 0)),
-                    'PE_OI': int(pe.get('openInterest', 0))
-                })
-        if rows:
-            df = pd.DataFrame(rows).sort_values('Strike').reset_index(drop=True)
-            return spot_val, df, expiry, None
-        else:
-            return None, None, None, "No strike records returned for the nearest expiry."
+        url = f"https://www.nseindia.com/api/option-chain-indices?symbol={symbol}"
+        res = session.get(url, headers=headers, timeout=5)
+        
+        if res.status_code == 200:
+            data = res.json()
+            spot_val = float(data['records']['underlyingValue'])
+            expiry = data['records']['expiryDates'][0]
+            rows = []
+            for item in data['records']['data']:
+                if item.get('expiryDate') == expiry:
+                    strike = float(item.get('strikePrice'))
+                    ce = item.get('CE', {})
+                    pe = item.get('PE', {})
+                    rows.append({
+                        'Strike': strike,
+                        'CE_OI': int(ce.get('openInterest', 0)),
+                        'CE_Vol': int(ce.get('totalTradedVolume', 0)),
+                        'CE_LTP': float(ce.get('lastPrice', 0.0)),
+                        'PE_LTP': float(pe.get('lastPrice', 0.0)),
+                        'PE_Vol': int(pe.get('totalTradedVolume', 0)),
+                        'PE_OI': int(pe.get('openInterest', 0))
+                    })
+            if rows:
+                return spot_val, pd.DataFrame(rows).sort_values('Strike').reset_index(drop=True), expiry, None
     except Exception as e:
-        return None, None, None, f"Failed to fetch live NSE data: {e}"
+        return None, None, None, f"Cloud IP blocked or NSE rate-limited: {e}"
 
-spot, df_raw, active_expiry, fetch_err = fetch_live_chain(index_choice)
-
-if fetch_err or df_raw is None:
-    st.error(f"⚠️ Exchange Feed Offline: {fetch_err}")
-    st.info("Retrying connection on next cycle. Ensure active internet connection and that NSE endpoints are accessible.")
-    if auto_refresh:
-        time.sleep(5)
-        st.rerun()
-    st.stop()
-
+    return None, None, None, "NSE data endpoint unreachable from current server IP."
+    
 # --- 6. Fetch Day VWAP & India VIX ---
 yf_sym = "^NSEI" if index_choice == "NIFTY" else "^NSEBANK"
 try:
