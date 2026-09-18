@@ -1,10 +1,10 @@
 import streamlit as st
 import pandas as pd
-import requests
 import yfinance as yf
 import time
 from datetime import datetime
 import pytz
+from nsepython import nse_optionchain_scrapper
 
 # --- 1. Page Configuration ---
 st.set_page_config(page_title="Nifty Institutional COA Engine", layout="wide")
@@ -79,75 +79,47 @@ st.sidebar.header("⚙️ Controls")
 index_choice = st.sidebar.selectbox("Select Instrument", ["NIFTY", "BANKNIFTY"], index=0)
 auto_refresh = st.sidebar.checkbox("Auto Refresh (every 5 sec)", value=True)
 
-# --- 5. Market & Option Chain Engine ---
+# --- 5. Clean Live Option Chain Engine via nsepython ---
 def fetch_live_chain(symbol):
-    url = f"https://www.nseindia.com/api/option-chain-indices?symbol={symbol}"
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Accept-Encoding': 'gzip, deflate, br'
-    }
-    
-    # Direct NSE Session attempt
     try:
-        session = requests.Session()
-        session.get("https://www.nseindia.com", headers=headers, timeout=2.5)
-        response = session.get(url, headers=headers, timeout=2.5)
-        if response.status_code == 200:
-            data = response.json()
-            spot_val = float(data['records']['underlyingValue'])
-            records = data['records']['data']
-            expiry = data['records']['expiryDates'][0]
-            
-            rows = []
-            for item in records:
-                if item.get('expiryDate') == expiry:
-                    strike = item.get('strikePrice')
-                    ce = item.get('CE', {})
-                    pe = item.get('PE', {})
-                    rows.append({
-                        'Strike': strike,
-                        'CE_OI': ce.get('openInterest', 0),
-                        'CE_Vol': ce.get('totalTradedVolume', 0),
-                        'CE_LTP': ce.get('lastPrice', 0.0),
-                        'PE_LTP': pe.get('lastPrice', 0.0),
-                        'PE_Vol': pe.get('totalTradedVolume', 0),
-                        'PE_OI': pe.get('openInterest', 0)
-                    })
-            if rows:
-                return spot_val, pd.DataFrame(rows), expiry, None
-    except Exception:
-        pass
+        raw_data = nse_optionchain_scrapper(symbol)
+        spot_val = float(raw_data['records']['underlyingValue'])
+        expiry = raw_data['records']['expiryDates'][0]
+        
+        rows = []
+        for item in raw_data['records']['data']:
+            if item.get('expiryDate') == expiry:
+                strike = float(item.get('strikePrice'))
+                ce = item.get('CE', {})
+                pe = item.get('PE', {})
+                rows.append({
+                    'Strike': strike,
+                    'CE_OI': int(ce.get('openInterest', 0)),
+                    'CE_Vol': int(ce.get('totalTradedVolume', 0)),
+                    'CE_LTP': float(ce.get('lastPrice', 0.0)),
+                    'PE_LTP': float(pe.get('lastPrice', 0.0)),
+                    'PE_Vol': int(pe.get('totalTradedVolume', 0)),
+                    'PE_OI': int(pe.get('openInterest', 0))
+                })
+        if rows:
+            df = pd.DataFrame(rows).sort_values('Strike').reset_index(drop=True)
+            return spot_val, df, expiry, None
+        else:
+            return None, None, None, "No strike records returned for the nearest expiry."
+    except Exception as e:
+        return None, None, None, f"Failed to fetch live NSE data: {e}"
 
-    # Precision Real-Time Yahoo Ticker Flow
-    yf_symbol = "^NSEI" if symbol == "NIFTY" else "^NSEBANK"
-    tkr = yf.Ticker(yf_symbol)
-    hist = tkr.history(period="1d", interval="1m")
-    spot_val = float(hist['Close'].iloc[-1]) if not hist.empty else 24146.15
-    
-    step = 50 if symbol == "NIFTY" else 100
-    atm = round(spot_val / step) * step
-    strikes = [atm + (i * step) for i in range(-5, 6)]
-    
-    sec = datetime.now().second
-    sim_rows = []
-    for s in strikes:
-        diff = spot_val - s
-        c_p = max(1.5, round(max(0, diff) + 32.0 * (1 - (s - spot_val)/(step * 5)) + (sec % 3)*0.2, 2))
-        p_p = max(1.5, round(max(0, -diff) + 30.0 * (1 - (spot_val - s)/(step * 5)) - (sec % 3)*0.2, 2))
-        c_v = int(2450000 - abs(s - (atm + step))*3800 + (sec * 1420))
-        p_v = int(2300000 - abs(s - atm)*3600 + (sec * 1280))
-        c_o = int(215000 - abs(s - (atm + step*2))*380 + (sec * 95))
-        p_o = int(228000 - abs(s - (atm - step))*390 + (sec * 90))
-        sim_rows.append({
-            'Strike': s, 'CE_OI': c_o, 'CE_Vol': c_v, 'CE_LTP': c_p,
-            'PE_LTP': p_p, 'PE_Vol': p_v, 'PE_OI': p_o
-        })
-    return spot_val, pd.DataFrame(sim_rows), "Current Expiry", None
+spot, df_raw, active_expiry, fetch_err = fetch_live_chain(index_choice)
 
-spot, df_raw, active_expiry, _ = fetch_live_chain(index_choice)
+if fetch_err or df_raw is None:
+    st.error(f"⚠️ Exchange Feed Offline: {fetch_err}")
+    st.info("Retrying connection on next cycle. Ensure active internet connection and that NSE endpoints are accessible.")
+    if auto_refresh:
+        time.sleep(5)
+        st.rerun()
+    st.stop()
 
-# --- 6. Fetch VWAP & India VIX ---
+# --- 6. Fetch Day VWAP & India VIX ---
 yf_sym = "^NSEI" if index_choice == "NIFTY" else "^NSEBANK"
 try:
     hist_1m = yf.Ticker(yf_sym).history(period="1d", interval="1m")
@@ -155,20 +127,20 @@ try:
         valid = hist_1m[hist_1m['Volume'] > 0]
         vwap = float((valid['Close'] * valid['Volume']).sum() / valid['Volume'].sum()) if not valid.empty else float(hist_1m['Close'].mean())
     else:
-        vwap = spot - 10.80
+        vwap = spot
 except Exception:
-    vwap = spot - 10.80
+    vwap = spot
 
 try:
     vix_hist = yf.Ticker("^INDIAVIX").history(period="1d", interval="1m")
-    vix = float(vix_hist['Close'].iloc[-1]) if not vix_hist.empty else 10.94
+    vix = float(vix_hist['Close'].iloc[-1]) if not vix_hist.empty else 12.0
 except Exception:
-    vix = 10.94
+    vix = 12.0
 
 buffer_pts = 15.0 if vix > 16.0 else (12.0 if vix > 13.5 else 8.0)
 sl_buffer = 15.0 if vix > 15.0 else 12.0
 
-# Filter ATM +/- 300
+# Filter ATM +/- 300 points for focused analysis
 step = 50 if index_choice == "NIFTY" else 100
 atm_strike = round(spot / step) * step
 df_active = df_raw[(df_raw['Strike'] >= spot - 300) & (df_raw['Strike'] <= spot + 300)].copy()
@@ -284,7 +256,7 @@ else:
     st.info(f"⚖️ **Equilibrium Zone**: Spot is {abs(spot - macro_eos):.1f} pts from Macro EOS and {abs(macro_eor - spot):.1f} pts from Macro EOR. Stand aside.")
 
 # --- 11. Styled Option Ladder ---
-st.subheader("📊 Live Option Ladder (Descending Strikes)")
+st.subheader(f"📊 Live Option Ladder — Expiry: {active_expiry}")
 
 display_df = df_final.drop(columns=['_raw_strike'])
 
@@ -295,11 +267,11 @@ def style_ladder(row):
     
     strike_val = int(row['Strike'])
     
-    # ATM Highlight
+    # ATM Strike Row
     if strike_val == atm_strike:
         styles[display_df.columns.get_loc('Strike')] = 'background-color: #0d47a1; color: #ffffff; font-weight: bold;'
 
-    # Call Side Highlights
+    # Call Highlights
     if strike_val == int(k_r_vol):
         styles[display_df.columns.get_loc('CE_Vol')] = 'background-color: #b71c1c; color: #ffffff; font-weight: bold;'
     elif ce_shift_ratio >= 75 and strike_val == int(second_ce_vol_strike):
@@ -308,7 +280,7 @@ def style_ladder(row):
     if strike_val == int(k_r_oi):
         styles[display_df.columns.get_loc('CE_OI')] = 'background-color: #880e4f; color: #ffffff; font-weight: bold;'
 
-    # Put Side Highlights
+    # Put Highlights
     if strike_val == int(k_s_vol):
         styles[display_df.columns.get_loc('PE_Vol')] = 'background-color: #1b5e20; color: #ffffff; font-weight: bold;'
     elif pe_shift_ratio >= 75 and strike_val == int(second_pe_vol_strike):
