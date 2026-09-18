@@ -1,10 +1,10 @@
 import streamlit as st
 import pandas as pd
 import yfinance as yf
+import requests
 import time
 from datetime import datetime
 import pytz
-from nsepython import nse_optionchain_scrapper
 
 # --- 1. Page Configuration ---
 st.set_page_config(page_title="Nifty Institutional COA Engine", layout="wide")
@@ -79,13 +79,11 @@ st.sidebar.header("⚙️ Controls")
 index_choice = st.sidebar.selectbox("Select Instrument", ["NIFTY", "BANKNIFTY"], index=0)
 auto_refresh = st.sidebar.checkbox("Auto Refresh (every 5 sec)", value=True)
 
-# --- 5. Clean Live Option Chain Engine via nsepython ---
-import requests
-from nsepython import nse_optionchain_scrapper
-
+# --- 5. Data Fetch Engine ---
 def fetch_live_chain(symbol):
-    # Attempt 1: Official nsepython scrapper
+    # Method 1: nsepython scraper
     try:
+        from nsepython import nse_optionchain_scrapper
         raw_data = nse_optionchain_scrapper(symbol)
         if raw_data and 'records' in raw_data and raw_data['records'].get('data'):
             spot_val = float(raw_data['records']['underlyingValue'])
@@ -110,7 +108,7 @@ def fetch_live_chain(symbol):
     except Exception:
         pass
 
-    # Attempt 2: Direct Session Handshake with Browser Headers
+    # Method 2: Direct HTTP handshake with modern browser headers
     try:
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
@@ -146,10 +144,22 @@ def fetch_live_chain(symbol):
             if rows:
                 return spot_val, pd.DataFrame(rows).sort_values('Strike').reset_index(drop=True), expiry, None
     except Exception as e:
-        return None, None, None, f"Cloud IP blocked or NSE rate-limited: {e}"
+        return None, None, None, f"Connection error: {e}"
 
     return None, None, None, "NSE data endpoint unreachable from current server IP."
-    
+
+# --- Call Fetch Function and Unpack Variables ---
+spot, df_raw, active_expiry, fetch_err = fetch_live_chain(index_choice)
+
+# --- Guard Clause: Stop execution immediately if data is missing ---
+if spot is None or df_raw is None:
+    st.error(f"⚠️ Market Data Unavailable: {fetch_err}")
+    st.info("If running on Streamlit Cloud, NSE may be blocking cloud data center IPs. Run the script locally on your computer via terminal: `streamlit run app.py`.")
+    if auto_refresh:
+        time.sleep(5)
+        st.rerun()
+    st.stop()
+
 # --- 6. Fetch Day VWAP & India VIX ---
 yf_sym = "^NSEI" if index_choice == "NIFTY" else "^NSEBANK"
 try:
@@ -171,15 +181,15 @@ except Exception:
 buffer_pts = 15.0 if vix > 16.0 else (12.0 if vix > 13.5 else 8.0)
 sl_buffer = 15.0 if vix > 15.0 else 12.0
 
-# Filter ATM +/- 300 points for focused analysis
+# --- 7. Shift Radar & Support/Resistance Calculations ---
 step = 50 if index_choice == "NIFTY" else 100
 atm_strike = round(spot / step) * step
+
 df_active = df_raw[(df_raw['Strike'] >= spot - 300) & (df_raw['Strike'] <= spot + 300)].copy()
 
 for col in ['CE_OI', 'CE_Vol', 'CE_LTP', 'PE_LTP', 'PE_Vol', 'PE_OI']:
     df_active[col] = pd.to_numeric(df_active[col], errors='coerce').fillna(0)
 
-# --- 7. Shift Radar & Support/Resistance Calculations ---
 max_ce_vol_row = df_active.loc[df_active['CE_Vol'].idxmax()]
 k_r_vol = float(max_ce_vol_row['Strike'])
 max_ce_vol_val = float(max_ce_vol_row['CE_Vol'])
@@ -196,7 +206,6 @@ k_s_oi = float(df_active.loc[df_active['PE_OI'].idxmax()]['Strike'])
 macro_eor = k_r_vol + ce_vol_ltp
 macro_eos = k_s_vol - pe_vol_ltp
 
-# 2nd Highest Strikes for WTT / WTB Detection
 df_ce_sec = df_active[df_active['Strike'] != k_r_vol]
 second_ce_vol_row = df_ce_sec.loc[df_ce_sec['CE_Vol'].idxmax()] if not df_ce_sec.empty else None
 second_ce_vol_strike = float(second_ce_vol_row['Strike']) if second_ce_vol_row is not None else k_r_vol
