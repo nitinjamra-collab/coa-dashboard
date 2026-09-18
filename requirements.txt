@@ -2,3 +2,6 @@ streamlit
 pandas
 yfinance
 pytz
+requests
+nsepython
+curl_cffi
